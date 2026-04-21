@@ -1,4 +1,4 @@
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import torch
 import wandb
@@ -24,6 +24,8 @@ class BinarySegmentationLitModule(LightningModule):
         validation_img_log_idx: int = 0,
         strict_loading: bool = True,
         vmax: float = 1,
+        num_classes: int = 1,
+        class_weights: Optional[List[float]] = None,
     ) -> None:
         """Initialize a `BinarySegmentationLitModule`.
 
@@ -36,6 +38,8 @@ class BinarySegmentationLitModule(LightningModule):
         :param validation_img_log_idx: The index of the batch to log images during validation.
         :param strict_loading: Whether to strictly check for missing keys when loading the model state.
         :param vmax: The maximum value for the colormap in logging probability heatmaps.
+        :param num_classes: Number of classes (1 for binary, >1 for multiclass). Defaults to 1.
+        :param class_weights: Optional weights for each class in loss function.
         """
         super().__init__()
 
@@ -47,17 +51,31 @@ class BinarySegmentationLitModule(LightningModule):
         )
 
         self.net = net
+        self.num_classes = num_classes
 
-        # loss function
-        self.criterion = torch.nn.BCELoss()
+        # loss function - choose based on task
+        if num_classes == 1:
+            self.criterion = torch.nn.BCELoss()
+            task = "binary"
+        else:
+            if class_weights is not None:
+                weights = torch.tensor(class_weights, dtype=torch.float32)
+                self.criterion = torch.nn.CrossEntropyLoss(weight=weights)
+            else:
+                self.criterion = torch.nn.CrossEntropyLoss()
+            task = "multiclass"
 
         # metric objects for calculating and averaging accuracy across batches
         self.phases = ["train", "val", "test"]
         for phase in self.phases:
-            setattr(self, f"{phase}_acc", Accuracy(task="binary"))
+            if task == "binary":
+                setattr(self, f"{phase}_acc", Accuracy(task="binary"))
+                setattr(self, f"{phase}_f1", BinaryF1Score(threshold=pred_threshold))
+            else:
+                setattr(self, f"{phase}_acc", Accuracy(task="multiclass", num_classes=num_classes))
+            
             setattr(self, f"{phase}_loss", MeanMetric())
-            setattr(self, f"{phase}_miou", MeanIoU())
-            setattr(self, f"{phase}_f1", BinaryF1Score(threshold=pred_threshold))
+            setattr(self, f"{phase}_miou", MeanIoU(num_classes=num_classes))
 
         # for tracking best so far validation accuracy
         self.val_acc_best = MaxMetric()
@@ -101,9 +119,12 @@ class BinarySegmentationLitModule(LightningModule):
         x = batch["raw_img"]
         y = batch["gt_traversability"]
         probs = self.forward(x)
-        loss = self.criterion(probs, y.float())
+        loss = self.criterion(probs, y.float() if self.num_classes == 1 else y.long())
 
-        pred = (probs > self.pred_threshold).int()
+        if self.num_classes == 1:
+            pred = (probs > self.pred_threshold).int()
+        else:
+            pred = torch.argmax(probs, dim=1)
 
         return loss, pred, probs
 
@@ -124,12 +145,14 @@ class BinarySegmentationLitModule(LightningModule):
         self.train_loss(loss)
         self.train_acc(preds, targets)
         self.train_miou(preds, targets)
-        self.train_f1(preds, targets)
+        if self.num_classes == 1:
+            self.train_f1(preds, targets)
 
         self.log("train/loss", self.train_loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train/miou", self.train_miou, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("train/f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True)
+        if self.num_classes == 1:
+            self.log("train/f1", self.train_f1, on_step=False, on_epoch=True, prog_bar=True)
 
         # Visualize predictions and targets on the second last batch of the epoch
         if batch_idx == len(self.trainer.train_dataloader) - 2:
@@ -175,12 +198,14 @@ class BinarySegmentationLitModule(LightningModule):
         self.val_loss(loss)
         self.val_acc(preds, targets)
         self.val_miou(preds, targets)
-        self.val_f1(preds, targets)
+        if self.num_classes == 1:
+            self.val_f1(preds, targets)
 
         self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
         self.log("val/miou", self.val_miou, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True)
+        if self.num_classes == 1:
+            self.log("val/f1", self.val_f1, on_step=False, on_epoch=True, prog_bar=True)
 
         # Visualize predictions and targets
         if batch_idx == self.hparams.validation_img_log_idx:
@@ -232,12 +257,14 @@ class BinarySegmentationLitModule(LightningModule):
         self.test_loss(loss)
         self.test_acc(preds, targets)
         self.test_miou(preds, targets)
-        self.test_f1(preds, targets)
+        if self.num_classes == 1:
+            self.test_f1(preds, targets)
 
         self.log("test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
         self.log("test/miou", self.test_miou, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test/f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True)
+        if self.num_classes == 1:
+            self.log("test/f1", self.test_f1, on_step=False, on_epoch=True, prog_bar=True)
 
         # Visualize predictions and targets
         if batch_idx == self.hparams.validation_img_log_idx:

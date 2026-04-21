@@ -75,7 +75,10 @@ class ExploRFM(nn.Module):
         )
     
     def init_traversability_head(self, traversability_ckpt: str) -> None:
-        """Initialize the traversability detection head."""
+        """Initialize the traversability detection head for 3-class classification.
+        
+        Classes: 0=unsafe, 1=safe, 2=mildly_risky (grass)
+        """
         self.traversability_head = nn.Sequential(
             nn.ConvTranspose2d(self.dim, self.dim//2, 2, stride=2),
             nn.Conv2d(self.dim//2, self.dim//2, 3, padding=1),
@@ -86,7 +89,7 @@ class ExploRFM(nn.Module):
             nn.ConvTranspose2d(self.dim//4, self.dim//8, 2, stride=2),
             nn.Conv2d(self.dim//8, self.dim//8, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(self.dim//8, 1, 2, stride=2),
+            nn.ConvTranspose2d(self.dim//8, 3, 2, stride=2),  # 3 output channels for 3-class classification
         )
         # load traversability checkpoint
         if os.path.exists(traversability_ckpt):
@@ -94,8 +97,18 @@ class ExploRFM(nn.Module):
             state_dict = {}
             for k, v in orig_state_dict.items():
                 state_dict[k.replace('net.head.', '')] = v
-            self.traversability_head.load_state_dict(state_dict)
-            print(f"Loaded traversability head from {traversability_ckpt}")
+            # Try to load, but if the last layer doesn't match, reinitialize it
+            try:
+                self.traversability_head.load_state_dict(state_dict)
+                print(f"Loaded traversability head from {traversability_ckpt}")
+            except RuntimeError as e:
+                print(f"Warning: Could not load complete state dict ({e}). Loading partial weights.")
+                # Load all but the last layer
+                for name, param in self.traversability_head.named_parameters():
+                    if '9' not in name:  # Skip the last layer (index 9)
+                        if name in state_dict:
+                            param.data = state_dict[name]
+                print(f"Loaded partial weights from {traversability_ckpt}. Last layer reinitialized.")
         else:
             raise FileNotFoundError(f"Traversability checkpoint not found: {traversability_ckpt}")
 
@@ -162,7 +175,8 @@ class ExploRFM(nn.Module):
         if self.traversability_head is not None:
             traversability = self.traversability_head(spatial_features)
             traversability = F.interpolate(traversability, size=x.shape[-2:], mode='bilinear', align_corners=False)
-            traversability = F.sigmoid(traversability)
+            # Apply softmax for 3-class classification
+            traversability = F.softmax(traversability, dim=1)
 
         frontiers = None
         if self.frontier_head is not None:
