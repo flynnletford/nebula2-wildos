@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test script for ExploRFM inference on a JPG image.
-Outputs frontier detection visualization.
+Outputs frontier detection and Open-Vocab similarity visualization.
 """
 
 import os
@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 # Add explorfm to path
@@ -30,19 +31,42 @@ def normalize_output(tensor: torch.Tensor) -> np.ndarray:
 
 def colorize_heatmap(heatmap: np.ndarray) -> np.ndarray:
     """Convert grayscale heatmap to color using viridis colormap."""
-    # Normalize to 0-1
     heatmap_norm = heatmap.astype(np.float32) / 255.0
-    
-    # Apply colormap
     cmap = plt.colormaps['viridis']
     colored = cmap(heatmap_norm)
-    
-    # Convert to BGR (OpenCV format)
     colored_bgr = cv2.cvtColor((colored[:, :, :3] * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
     return colored_bgr
 
+def visualize_similarity(image: np.ndarray, spatial_features: torch.Tensor, text_features: torch.Tensor) -> np.ndarray:
+    # 1. Normalize
+    spatial_features = F.normalize(spatial_features, p=2, dim=1)
+    text_features = F.normalize(text_features, p=2, dim=1)
 
-def overlay_traversable_frontiers(image: np.ndarray, frontier_map: np.ndarray, traversability_map: np.ndarray, frontier_threshold: float = 0.5, traversability_threshold: float = 0.5) -> np.ndarray:
+    # 2. Compute Raw Cosine Similarity [H, W] at feature resolution
+    sim_map = torch.einsum('bchw,bc->bhw', spatial_features, text_features).squeeze().cpu().numpy()
+    
+    # 3. THRESHOLD FIRST (Paper Logic: Set to 1 if > 0.09, else 0)
+    # We convert to float32 so cv2.resize can handle it smoothly
+    low_res_mask = (sim_map > 0.09).astype(np.float32)
+    
+    # 4. UPSAMPLE SECOND
+    # Use INTER_NEAREST if you want blocky blocks, or INTER_LINEAR for slightly soft edges
+    high_res_mask = cv2.resize(low_res_mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+    
+    # Convert back to a boolean mask for indexing (using 0.5 as the binary cutoff after interpolation)
+    mask = high_res_mask > 0.5
+    
+    # 5. Apply Overlay
+    result = image.copy()
+    alpha = 0.5
+    red_color = np.array([0, 0, 255], dtype=np.uint8)
+    
+    result[mask] = (image[mask] * (1 - alpha) + red_color * alpha).astype(np.uint8)
+    
+    return result
+
+
+def overlay_traversable_frontiers(image: np.ndarray, frontier_map: np.ndarray, traversability_map: np.ndarray, frontier_threshold: float, traversability_threshold: float) -> np.ndarray:
     """Overlay frontier heatmap on the original image, only where traversable.
     
     Args:
@@ -82,7 +106,7 @@ def overlay_traversable_frontiers(image: np.ndarray, frontier_map: np.ndarray, t
     return result
 
 
-def overlay_traversability_on_image(image: np.ndarray, traversability_map: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+def overlay_traversability_on_image(image: np.ndarray, traversability_map: np.ndarray, threshold: float) -> np.ndarray:
     """Overlay traversability heatmap on the original image with green highlighting.
     
     Args:
@@ -117,7 +141,7 @@ def overlay_traversability_on_image(image: np.ndarray, traversability_map: np.nd
     return result
 
 
-def overlay_frontiers_unfiltered(image: np.ndarray, frontier_map: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+def overlay_frontiers_unfiltered(image: np.ndarray, frontier_map: np.ndarray, threshold: float) -> np.ndarray:
     """Overlay frontier heatmap on the original image without traversability filtering.
     
     Args:
@@ -153,12 +177,12 @@ def overlay_frontiers_unfiltered(image: np.ndarray, frontier_map: np.ndarray, th
 
 
 
-def test_explorfm(image_path: str, output_dir: str = "explorfm_outputs", frontier_confidence: float = 0.6, traversability_confidence: float = 0.5):
-    """
-    Run ExploRFM inference on an image and save frontier visualization.
+def test_explorfm(image_path: str, goal_text: str = "", output_dir: str = "test_results", frontier_confidence: float = 0.6, traversability_confidence: float = 0.9):
+    """ Run ExploRFM inference on an image and save frontier visualization.
     
     Args:
         image_path: Path to input JPG image
+        goal_text: Text description of the goal (optional)
         output_dir: Directory to save output image
         frontier_confidence: Minimum confidence threshold for frontier detection (default: 0.6 from paper)
         traversability_confidence: Minimum confidence threshold for traversability (default: 0.5)
@@ -186,9 +210,9 @@ def test_explorfm(image_path: str, output_dir: str = "explorfm_outputs", frontie
     print("Initializing ExploRFM model...")
     model = ExploRFMInference(
         frontier_ckpt="ckpts/frontier_head.ckpt",
-        traversability_ckpt="ckpts/trav_head.ckpt",  # Include traversability head
+        traversability_ckpt="ckpts/trav_head.ckpt",
         model_version="c-radio_v3-b",
-        adaptor_version=None,  # No text features needed
+        adaptor_version="siglip2",  
         radio_dim=768,
         static_scale_factor=1.0,
         model_precision="FP32",
@@ -199,8 +223,11 @@ def test_explorfm(image_path: str, output_dir: str = "explorfm_outputs", frontie
     print("Running inference...")
     inference_start_time = time.time()
     with torch.no_grad():
-        traversability, frontiers, _ = model.forward_on_numpy(image_rgb)
-    inference_time = time.time() - inference_start_time
+        traversability, frontiers, spatial_features = model.forward_on_numpy(image_rgb)
+
+        text_feats = model.forward_on_text([goal_text])
+
+        inference_time = time.time() - inference_start_time
     
     print(f"Inference completed in {inference_time:.2f} seconds")
     print(f"Frontiers shape: {frontiers.shape}")
@@ -246,6 +273,14 @@ def test_explorfm(image_path: str, output_dir: str = "explorfm_outputs", frontie
     frontiers_unfiltered_overlay_path = os.path.join(str(output_subdir), "05_frontiers_unfiltered_overlay.jpg")
     cv2.imwrite(frontiers_unfiltered_overlay_path, frontiers_unfiltered_overlay)
     print(f"Saved unfiltered frontiers overlay to {frontiers_unfiltered_overlay_path}")
+
+
+    # Create and save Similarity Heatmap
+    if spatial_features is not None:
+        similarity_overlay = visualize_similarity(image, spatial_features, text_feats)
+        sim_path = str(output_subdir / f"06_similarity_{goal_text.replace(' ', '_')}.jpg")
+        cv2.imwrite(sim_path, similarity_overlay)
+        print(f"Saved similarity heatmap to {sim_path}")
     
     print(f"\n✓ Inference complete! Check the output directory for results.")
     print(f"  Frontier confidence threshold: {frontier_confidence}")
@@ -261,7 +296,8 @@ def test_explorfm(image_path: str, output_dir: str = "explorfm_outputs", frontie
 
 
 if __name__ == "__main__":
-   
+    # USER CONFIG: Set your target object here
+    TARGET_GOAL = "Building" 
     
     input_path = Path("test_images")
     extensions = ("*.jpg", "*.jpeg", "*.png")
@@ -272,7 +308,5 @@ if __name__ == "__main__":
     if not image_files:
         print(f"No images found in {input_path}")
     
-    
     for image_file in image_files:
-        print(f"\nProcessing image: {image_file}")
-        test_explorfm(str(image_file), "test_results", frontier_confidence=0.6, traversability_confidence=0.9)
+        test_explorfm(str(image_file), goal_text=TARGET_GOAL)
