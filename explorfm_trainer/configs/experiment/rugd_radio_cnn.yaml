@@ -38,8 +38,8 @@ logger:
     name: test_train_rugd_radio_cnn_naclip
 
 paths:
-  root_dir: /cluster/home/$USER/scratch/explorfm_trainer
-  data_dir: /cluster/home/$USER/scratch/data
+  root_dir: /home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/explorfm_trainer
+  data_dir: /home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/data
 
 trainer:
   max_epochs: 10

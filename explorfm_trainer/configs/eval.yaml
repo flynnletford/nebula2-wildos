@@ -2,15 +2,15 @@
 
 defaults:
   - _self_
-  - data: mnist # choose datamodule with `test_dataloader()` for evaluation
-  - model: mnist
+  - data: rugd
+  - model: binary_seg
   - logger: null
   - trainer: default
   - paths: default
   - extras: default
   - hydra: default
 
-  - evaluation: null # evaluation config for running evaluation
+  - evaluation: radio_cnn # ensures model.net is defined for checkpoint evaluation
 
 task_name: "eval"
 
@@ -18,3 +18,10 @@ tags: ["dev"]
 
 # passing checkpoint path is necessary for evaluation
 ckpt_path: ???
+
+model:
+  strict_loading: false
+
+paths:
+  root_dir: /home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/explorfm_trainer
+  data_dir: /home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/data

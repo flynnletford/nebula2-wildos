@@ -1,5 +1,15 @@
 from typing import Any, Dict, List, Tuple
 
+import torch
+import functools
+
+# Add safe globals for checkpoint loading (PyTorch 2.6+)
+# torch.serialization.add_safe_globals([
+#     functools.partial,
+#     torch.optim.Adam,
+#     torch.optim.lr_scheduler.ReduceLROnPlateau,
+# ])
+
 import hydra
 import rootutils
 from lightning import LightningDataModule, LightningModule, Trainer
@@ -56,6 +66,14 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
+    model_cfg = cfg.get("model")
+    if model_cfg is None or model_cfg.get("net") is None:
+        raise ValueError(
+            "Missing `model.net` in eval config. "
+            "Run with an evaluation preset such as `evaluation=radio_ovts` "
+            "(or explicitly set `model.net=...`) before calling `src/eval.py`."
+        )
+
     log.info(f"Instantiating model <{cfg.model._target_}>")
     model: LightningModule = hydra.utils.instantiate(cfg.model)
 
@@ -78,7 +96,7 @@ def evaluate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log_hyperparameters(object_dict)
 
     log.info("Starting testing!")
-    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path)
+    trainer.test(model=model, datamodule=datamodule, ckpt_path=cfg.ckpt_path, weights_only=False)
 
     # for predictions use trainer.predict(...)
     # predictions = trainer.predict(model=model, dataloaders=dataloaders, ckpt_path=cfg.ckpt_path)

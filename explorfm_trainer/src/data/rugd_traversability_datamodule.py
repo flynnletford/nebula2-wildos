@@ -57,8 +57,10 @@ class RUGDTraversabilityDataset(Dataset):
         self.split_scenes = ["creek", "village"]
         self.split_percentages = [0.8, 0.2]  # 80% for training, 20% for validation
 
-        self.raw_frames_path = os.path.join(self.data_dir, "RUGD_frames")
-        self.annotations_path = os.path.join(self.data_dir, "RUGD_annotations")
+        data_dir = "/home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/data/RUGD"
+
+        self.raw_frames_path = os.path.join(data_dir, "RUGD_frames")
+        self.annotations_path = os.path.join(data_dir, "RUGD_annotations")
         self.colormap_path = os.path.join(self.annotations_path, "RUGD_annotation-colormap.txt")
         self.seg_colormap = self.load_annotations()
 
