@@ -1,16 +1,17 @@
 from typing import Any, Dict, Tuple
 
 import torch
+import torch.nn.functional as F
 import wandb
 from lightning import LightningModule
 from torchmetrics import MaxMetric, MeanMetric
 from torchmetrics.classification.accuracy import Accuracy
-from torchmetrics.classification import BinaryF1Score
+from torchmetrics.classification import MulticlassF1Score
 from torchmetrics.segmentation import MeanIoU
 from .components.radio_utils import gen_logging_image
 
 class BinarySegmentationLitModule(LightningModule):
-    """`LightningModule` for Binary Semantic Segmentation.
+    """`LightningModule` for Multi-class Semantic Segmentation (Traversability: 3 classes).
     """
 
     def __init__(
@@ -19,19 +20,19 @@ class BinarySegmentationLitModule(LightningModule):
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler,
         compile: bool,
-        pred_threshold: float = 0.5,
+        num_classes: int = 3,
         num_log_imgs: int = 4,
         validation_img_log_idx: int = 0,
         strict_loading: bool = True,
         vmax: float = 1,
     ) -> None:
-        """Initialize a `BinarySegmentationLitModule`.
+        """Initialize a `BinarySegmentationLitModule` for multi-class classification.
 
         :param net: The model to train.
         :param optimizer: The optimizer to use for training.
         :param scheduler: The learning rate scheduler to use for training.
         :param compile: Whether to compile the model for faster training with PyTorch 2.0.
-        :param pred_threshold: The threshold for binary predictions.
+        :param num_classes: The number of classes for segmentation. Defaults to 3 (safe, mildly_dangerous, untraversable).
         :param num_log_imgs: The number of images to log during training.
         :param validation_img_log_idx: The index of the batch to log images during validation.
         :param strict_loading: Whether to strictly check for missing keys when loading the model state.
@@ -49,21 +50,20 @@ class BinarySegmentationLitModule(LightningModule):
         self.net = net
 
         # loss function
-        self.criterion = torch.nn.BCELoss()
+        self.criterion = torch.nn.CrossEntropyLoss()
 
         # metric objects for calculating and averaging accuracy across batches
         self.phases = ["train", "val", "test"]
+        self.num_classes = num_classes
         for phase in self.phases:
-            setattr(self, f"{phase}_acc", Accuracy(task="binary"))
+            setattr(self, f"{phase}_acc", Accuracy(task="multiclass", num_classes=num_classes))
             setattr(self, f"{phase}_loss", MeanMetric())
-            setattr(self, f"{phase}_miou", MeanIoU())
-            setattr(self, f"{phase}_f1", BinaryF1Score(threshold=pred_threshold))
+            setattr(self, f"{phase}_miou", MeanIoU(num_classes=num_classes))
+            setattr(self, f"{phase}_f1", MulticlassF1Score(num_classes=num_classes, average="macro"))
 
         # for tracking best so far validation accuracy
         self.val_acc_best = MaxMetric()
         self.val_iou_best = MaxMetric()
-
-        self.pred_threshold = pred_threshold
 
         self.strict_loading=strict_loading
 
@@ -95,17 +95,17 @@ class BinarySegmentationLitModule(LightningModule):
 
         :return: A tuple containing (in order):
             - A tensor of losses.
-            - A tensor of predictions.
-            - A tensor of probabilities.
+            - A tensor of predictions (class indices).
+            - A tensor of logits (raw model output before softmax).
         """
         x = batch["raw_img"]
         y = batch["gt_traversability"]
-        probs = self.forward(x)
-        loss = self.criterion(probs, y.float())
+        logits = self.forward(x)  # Shape: (B, 3, H, W)
+        loss = self.criterion(logits, y)  # CrossEntropyLoss expects logits and long targets
 
-        pred = (probs > self.pred_threshold).int()
+        pred = logits.argmax(dim=1)  # Get class index for each pixel
 
-        return loss, pred, probs
+        return loss, pred, logits
 
     def training_step(
         self, batch: Dict, batch_idx: int
@@ -117,7 +117,7 @@ class BinarySegmentationLitModule(LightningModule):
         :param batch_idx: The index of the current batch.
         :return: A tensor of losses between model predictions and targets.
         """
-        loss, preds, probs = self.model_step(batch)
+        loss, preds, logits = self.model_step(batch)
         targets = batch["gt_traversability"]
 
         # update and log metrics
@@ -133,6 +133,8 @@ class BinarySegmentationLitModule(LightningModule):
 
         # Visualize predictions and targets on the second last batch of the epoch
         if batch_idx == len(self.trainer.train_dataloader) - 2:
+            # Convert logits to softmax probabilities for visualization
+            probs_softmax = F.softmax(logits, dim=1)
             self.logger.experiment.log(
                 {
                     "train/log_imgs": [
@@ -142,12 +144,13 @@ class BinarySegmentationLitModule(LightningModule):
                                 "gt_segmentation": batch["gt_img"],
                                 "gt_traversability": batch["gt_traversability"],
                                 "preds": preds,
-                                "probs": probs.detach(),
+                                "probs": probs_softmax.detach(),
                                 "img_path": batch["img_path"],
                             },
                             seg_colormap=self.trainer.train_dataloader.dataset.seg_colormap,
                             num_log_imgs=self.hparams.num_log_imgs,
-                            vmax=self.hparams.vmax
+                            vmax=self.hparams.vmax,
+                            num_classes=self.num_classes
                         )
                     ]
                 },
@@ -168,7 +171,7 @@ class BinarySegmentationLitModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        loss, preds, probs = self.model_step(batch)
+        loss, preds, logits = self.model_step(batch)
         targets = batch["gt_traversability"]
 
         # update and log metrics
@@ -184,6 +187,8 @@ class BinarySegmentationLitModule(LightningModule):
 
         # Visualize predictions and targets
         if batch_idx == self.hparams.validation_img_log_idx:
+            # Convert logits to softmax probabilities for visualization
+            probs_softmax = F.softmax(logits, dim=1)
             self.logger.experiment.log(
                 {
                     "val/log_imgs": [
@@ -193,12 +198,13 @@ class BinarySegmentationLitModule(LightningModule):
                                 "gt_segmentation": batch["gt_img"],
                                 "gt_traversability": batch["gt_traversability"],
                                 "preds": preds,
-                                "probs": probs,
+                                "probs": probs_softmax,
                                 "img_path": batch["img_path"],
                             },
                             seg_colormap=self.trainer.val_dataloaders.dataset.seg_colormap,
                             num_log_imgs=self.hparams.num_log_imgs,
-                            vmax=self.hparams.vmax
+                            vmax=self.hparams.vmax,
+                            num_classes=self.num_classes
                         )
                     ]
                 },
@@ -225,7 +231,7 @@ class BinarySegmentationLitModule(LightningModule):
             labels.
         :param batch_idx: The index of the current batch.
         """
-        loss, preds, probs = self.model_step(batch)
+        loss, preds, logits = self.model_step(batch)
         targets = batch["gt_traversability"]
 
         # update and log metrics
@@ -241,6 +247,8 @@ class BinarySegmentationLitModule(LightningModule):
 
         # Visualize predictions and targets
         if batch_idx == self.hparams.validation_img_log_idx:
+            # Convert logits to softmax probabilities for visualization
+            probs_softmax = F.softmax(logits, dim=1)
             self.logger.experiment.log(
                 {
                     "test/log_imgs": [
@@ -250,12 +258,13 @@ class BinarySegmentationLitModule(LightningModule):
                                 "gt_segmentation": batch["gt_img"],
                                 "gt_traversability": batch["gt_traversability"],
                                 "preds": preds,
-                                "probs": probs,
+                                "probs": probs_softmax,
                                 "img_path": batch["img_path"],
                             },
                             seg_colormap=self.trainer.test_dataloaders.dataset.seg_colormap,
                             num_log_imgs=self.hparams.num_log_imgs,
-                            vmax=self.hparams.vmax
+                            vmax=self.hparams.vmax,
+                            num_classes=self.num_classes
                         )
                     ]
                 },
@@ -308,7 +317,7 @@ if __name__ == "__main__":
         optimizer=torch.optim.Adam,
         scheduler=torch.optim.lr_scheduler.StepLR,
         compile=False,
-        pred_threshold=0.5,
+        num_classes=3,
         num_log_imgs=4,
         validation_img_log_idx=0
     )

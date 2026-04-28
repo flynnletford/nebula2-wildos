@@ -28,11 +28,14 @@ def gen_logging_image(
         num_log_imgs: int,
         cmap: str = "inferno",
         vmax: float = 1,
+        num_classes: int = 1,
     ) -> np.ndarray:
     """
     Visualize the predictions. 
-    Displays the original image, ground truth, the heatmap of text similarity, and the binary mask.
+    Displays the original image, ground truth, the heatmap of predictions, and the predicted mask.
     Also display the legend for the segmentation categories and the heatmap.
+    
+    :param num_classes: Number of output classes. 1 for binary, 3 for traversability.
     """
     B = batch_data["raw_img"].shape[0]
     idxs = np.random.choice(
@@ -44,9 +47,32 @@ def gen_logging_image(
         img_rgb = batch_data["raw_img"][i].cpu().numpy().transpose(1, 2, 0)
         img_rgb = (img_rgb * 255).astype(np.uint8)  # convert to uint8
         gt_seg = batch_data["gt_segmentation"][i].cpu().numpy()
-        gt_traversability = batch_data["gt_traversability"][i][0].cpu().numpy()
-        preds = batch_data["preds"][i][0].cpu().numpy()
-        probs = batch_data["probs"][i][0].cpu().numpy()
+        gt_traversability = batch_data["gt_traversability"][i].cpu().numpy()
+        preds = batch_data["preds"][i].cpu().numpy()
+        probs = batch_data["probs"][i].cpu().numpy()
+
+        # Handle multi-class case
+        if num_classes > 1:
+            # For 3-class: probs is (3, H, W), extract max probability
+            probs_viz = np.max(probs, axis=0)  # Max probability for any class
+            # Create colored class map for predictions
+            preds_colored = np.zeros((*preds.shape, 3), dtype=np.float32)
+            # Class 0 (safe) = green
+            preds_colored[preds == 0] = [0, 1, 0]
+            # Class 1 (mildly_dangerous) = yellow
+            preds_colored[preds == 1] = [1, 1, 0]
+            # Class 2 (untraversable) = red
+            preds_colored[preds == 2] = [1, 0, 0]
+            
+            # Create colored ground truth map
+            gt_colored = np.zeros((*gt_traversability.shape, 3), dtype=np.float32)
+            gt_colored[gt_traversability == 0] = [0, 1, 0]
+            gt_colored[gt_traversability == 1] = [1, 1, 0]
+            gt_colored[gt_traversability == 2] = [1, 0, 0]
+        else:
+            # Binary case
+            probs_viz = probs[0]  # Single channel
+            preds_colored = None
 
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))
         axes[0, 2].axis('off')
@@ -62,23 +88,31 @@ def gen_logging_image(
         axes[0, 1].set_title('Ground Truth Segmentation')
         axes[0, 1].axis('off')
 
-        # 3. Heatmap (text similarity)
+        # 3. Heatmap (probability scores)
         axes[1, 0].imshow(img_rgb)
-        heatmap = axes[1, 0].imshow(probs, cmap=cmap, vmin=0, vmax=vmax, alpha=0.5)
+        heatmap = axes[1, 0].imshow(probs_viz, cmap=cmap, vmin=0, vmax=vmax, alpha=0.5)
         axes[1, 0].set_title('Predicted Probabilities')
         axes[1, 0].axis('off')
         plt.colorbar(heatmap, ax=axes[1,0], fraction=0.046, pad=0.04)
 
-        # 4. Binary mask (thresholded)
+        # 4. Predicted mask/class map
         axes[1, 1].imshow(img_rgb)
-        axes[1, 1].imshow(preds, cmap='gray', alpha=0.5)
-        axes[1, 1].set_title(f'Predicted Binary Mask')
+        if num_classes > 1:
+            axes[1, 1].imshow(preds_colored, alpha=0.5)
+            axes[1, 1].set_title('Predicted 3-Class Map (G=safe, Y=mild, R=untrav)')
+        else:
+            axes[1, 1].imshow(preds, cmap='gray', alpha=0.5)
+            axes[1, 1].set_title('Predicted Binary Mask')
         axes[1, 1].axis('off')
 
-        # 5. Ground Truth Safe Mask
+        # 5. Ground Truth Traversability
         axes[1, 2].imshow(img_rgb)
-        axes[1, 2].imshow(gt_traversability, cmap='gray', alpha=0.5)
-        axes[1, 2].set_title('Ground Truth Safe Mask')
+        if num_classes > 1:
+            axes[1, 2].imshow(gt_colored, alpha=0.5)
+            axes[1, 2].set_title('Ground Truth 3-Class Map (G=safe, Y=mild, R=untrav)')
+        else:
+            axes[1, 2].imshow(gt_traversability, cmap='gray', alpha=0.5)
+            axes[1, 2].set_title('Ground Truth Safe Mask')
         axes[1, 2].axis('off')
 
         # Add segmentation legend below all subplots

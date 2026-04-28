@@ -9,7 +9,7 @@ from nvidia_radio.radio.pamr import PAMR
 from nvidia_radio.hubconf import radio_model
 
 class RADIO_CNN(nn.Module):
-    """A CNN decoder head on top of a RADIO model."""
+    """A CNN decoder head on top of a RADIO model for multi-class semantic segmentation."""
 
     def __init__(
         self,
@@ -17,7 +17,7 @@ class RADIO_CNN(nn.Module):
         adaptor_version: Optional[str] = None,
         use_naclip: bool = False,
         use_summary_for_spatial: bool = False,
-        sigmoid_out: bool = True,
+        num_output_channels: int = 3,
     ) -> None:
         """Initialize a `RADIO_CNN` module.
 
@@ -25,6 +25,7 @@ class RADIO_CNN(nn.Module):
         :param adaptor_version: The version of the adaptor to use.
         :param use_naclip: Whether to use the NA-CLIP changes.
         :param use_summary_for_spatial: Whether to use the summary adaptor for spatial features.
+        :param num_output_channels: The number of output channels for segmentation. Defaults to 3 for traversability (safe, mildly_dangerous, untraversable).
         """
         super().__init__()
 
@@ -40,7 +41,8 @@ class RADIO_CNN(nn.Module):
         else:
             self.dim = RADIO_ADAPTOR_VERSIONS[self.adaptor_version]
         self.use_naclip = use_naclip
-        self.use_summary_for_spatial = use_summary_for_spatial        
+        self.use_summary_for_spatial = use_summary_for_spatial
+        self.num_output_channels = num_output_channels
 
         self.radio_model, chk = radio_model(
             version=self.model_version,
@@ -70,15 +72,14 @@ class RADIO_CNN(nn.Module):
             nn.ConvTranspose2d(self.dim//4, self.dim//8, 2, stride=2),
             nn.Conv2d(self.dim//8, self.dim//8, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(self.dim//8, 1, 2, stride=2),
+            nn.ConvTranspose2d(self.dim//8, num_output_channels, 2, stride=2),
         )
-        self.sigmoid_out = sigmoid_out
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a single forward pass through the network.
 
         :param x: The input tensor.
-        :return: A tensor of predictions.
+        :return: A tensor of logits for multi-class segmentation.
         """
         nearest_res = self.radio_model.get_nearest_supported_resolution(*x.shape[-2:])
         x_resized = F.interpolate(x, nearest_res, mode='bilinear', align_corners=False)
@@ -91,9 +92,6 @@ class RADIO_CNN(nn.Module):
         out = self.head(spatial_features)
 
         out = F.interpolate(out, size=x.shape[-2:], mode='bilinear', align_corners=False)
-
-        if self.sigmoid_out:
-            out = F.sigmoid(out)
         
         return out
 
