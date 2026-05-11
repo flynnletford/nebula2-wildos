@@ -22,8 +22,12 @@ COPY model_ckpts /ros2_ws/model_ckpts
 # Copy ROS2 source code
 COPY src /ros2_ws/src
 
-# Source ROS2 setup in bashrc
-RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc
+# Build ROS2 packages with colcon
+RUN . /opt/ros/humble/setup.sh && colcon build
+
+# Source ROS2 and built packages in bashrc
+RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc && \
+    echo "source /ros2_ws/install/setup.bash" >> /etc/bash.bashrc
 
 # Default entrypoint to bash shell
 ENTRYPOINT ["/bin/bash"]

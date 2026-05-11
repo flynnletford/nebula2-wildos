@@ -57,6 +57,9 @@ class ExplorfmNode(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT
         )
 
+        # Create publisher for frontier visualization
+        self.frontier_vis_pub = self.create_publisher(Image, 'frontier_visualization', qos_profile=best_effort_qos)
+
         # Subscribe to camera info and image topics
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
@@ -142,7 +145,18 @@ class ExplorfmNode(Node):
         frontier_scores = self.normalize_output(raw_frontier_scores)
         frontiers = self.threshold_frontiers(frontier_scores)
 
+        # Get image dimensions for projection
+        img_h, img_w = frontiers.shape
+        
+        # Project points to image space
+        uv, valid = self.project_points_to_image(request.points, img_h, img_w)
+        
+        # Map points to frontiers
         frontier_bools = self.map_points_to_frontiers(request.points, frontiers)
+        
+        # Create and publish visualization
+        vis_image = self.visualize_frontiers(current_frame, frontiers, uv, valid)
+        self.publish_visualization(vis_image)
 
         response.scores = frontier_bools
         
@@ -262,6 +276,52 @@ class ExplorfmNode(Node):
         """Convert single-channel tensor output to a thresholded float array in range [0, 1]."""
         output = tensor.squeeze().detach().cpu().numpy()  # (1, 1, H, W) → (H, W)
         return output > threshold
+    
+    def visualize_frontiers(self, image_rgb, frontiers, uv, valid):
+        """
+        Create a visualization with frontier pixels highlighted in red and points marked with 'x'.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+            frontiers: Boolean frontier mask (H, W)
+            uv: Projected pixel coordinates (N, 2)
+            valid: Boolean mask for valid projections (N,)
+        
+        Returns:
+            Annotated RGB image as numpy array
+        """
+        # Make a copy to avoid modifying the original
+        vis_image = image_rgb.copy().astype(np.uint8)
+        
+        # Highlight frontier pixels in red
+        frontier_mask = frontiers.astype(bool)
+        vis_image[frontier_mask] = [255, 0, 0]  # Red in RGB
+        
+        # Draw 'x' markers for valid projected points
+        marker_size = 10
+        marker_color = (255, 255, 255)  # White in RGB
+        
+        for i, (u, v) in enumerate(uv):
+            if valid[i]:
+                u, v = int(u), int(v)
+                # Draw crossing lines to form an 'x'
+                cv2.line(vis_image, (u - marker_size, v - marker_size), (u + marker_size, v + marker_size), marker_color, 2)
+                cv2.line(vis_image, (u + marker_size, v - marker_size), (u - marker_size, v + marker_size), marker_color, 2)
+        
+        return vis_image
+    
+    def publish_visualization(self, image_rgb):
+        """
+        Publish visualization image to frontier_visualization topic.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+        """
+        try:
+            img_msg = bridge.cv2_to_imgmsg(image_rgb, encoding='rgb8')
+            self.frontier_vis_pub.publish(img_msg)
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish visualization: {e}")
     
 def main(args=None):
     rclpy.init(args=args)

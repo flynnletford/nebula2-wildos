@@ -5,12 +5,6 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: explorfm_ros2_humble
-    volumes:
-      - ./src:/ros2_ws/src
-      - ./build:/ros2_ws/build
-      - ./install:/ros2_ws/install
-      - ./log:/ros2_ws/log
-      - ./model_ckpts:/ros2_ws/model_ckpts
     working_dir: /ros2_ws
     environment:
       - ROS_DOMAIN_ID=0
