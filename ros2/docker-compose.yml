@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  ros2_humble:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: explorfm_ros2_humble
+    volumes:
+      - ./src:/ros2_ws/src
+      - ./build:/ros2_ws/build
+      - ./install:/ros2_ws/install
+      - ./log:/ros2_ws/log
+    working_dir: /ros2_ws
+    environment:
+      - ROS_DOMAIN_ID=0
+    stdin_open: true
+    tty: true
+    networks:
+      - ros2_network
+
+networks:
+  ros2_network:
+    driver: bridge
