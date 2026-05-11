@@ -1,6 +1,9 @@
 import time
 import torch
 import torch.nn.functional as F
+from datetime import datetime
+from pathlib import Path
+import os
 
 import numpy as np
 import cv2
@@ -57,9 +60,6 @@ class ExplorfmNode(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT
         )
 
-        # Create publisher for frontier visualization
-        self.frontier_vis_pub = self.create_publisher(Image, 'frontier_visualization', qos_profile=best_effort_qos)
-
         # Subscribe to camera info and image topics
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
@@ -81,13 +81,23 @@ class ExplorfmNode(Node):
         self.explorfm_model: ExploRFMInference = ExploRFMInference(
             frontier_ckpt="model_ckpts/frontier_head.ckpt",
             traversability_ckpt="model_ckpts/trav_head.ckpt",
-            model_version="c-radio_v3-b",
+            model_version="model_ckpts/c-radio_v3-b_half.pth.tar",
             adaptor_version=None, # We aren't doing object similarity checks so we don't need siglip.
             radio_dim=768,
             static_scale_factor=1.0,
             model_precision="FP32", # TODO: Can maybe use FP16 once deployed on the AGX Orin.
         )
         self.get_logger().info(f"Model loaded on device: {self.explorfm_model.device}")
+
+        # Initialize debug output directory
+        self.debug_output_dir = Path("/debug_images")
+        self.debug_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Read debug image saving preference from environment variable
+        save_debug_images_env = os.getenv("SAVE_DEBUG_IMAGES", "true").lower()
+        self.save_debug_images = save_debug_images_env in ("true", "1", "yes")
+        self.get_logger().info(f"Debug output directory: {self.debug_output_dir}")
+        self.get_logger().info(f"Save debug images: {self.save_debug_images}")
 
     def camera_info_callback(self, msg):
         """
@@ -118,7 +128,7 @@ class ExplorfmNode(Node):
         rgb = bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='rgb8')
         self.latest_frame = rgb
 
-        self.get_logger().debug('Latest frame received')
+        self.get_logger().info('Latest frame received')
 
     def score_visual_frontiers_callback(self, request, response):
         """
@@ -142,8 +152,7 @@ class ExplorfmNode(Node):
 
         # Assume points are already filtered by traversability.
         _, raw_frontier_scores = self.run_inference(current_frame)
-        frontier_scores = self.normalize_output(raw_frontier_scores)
-        frontiers = self.threshold_frontiers(frontier_scores)
+        frontiers = self.threshold_frontiers(raw_frontier_scores)
 
         # Get image dimensions for projection
         img_h, img_w = frontiers.shape
@@ -158,7 +167,7 @@ class ExplorfmNode(Node):
         vis_image = self.visualize_frontiers(current_frame, frontiers, uv, valid)
         self.publish_visualization(vis_image)
 
-        response.scores = frontier_bools
+        response.scores = frontier_bools.tolist()
         
         return response
 
@@ -191,6 +200,16 @@ class ExplorfmNode(Node):
 
         inference_time = time.time() - start_time
         self.get_logger().info(f'Traversability scoring completed in {inference_time:.2f} seconds')
+
+        # Get image dimensions for projection
+        img_h, img_w = traversability_class_map.shape
+        
+        # Project points to image space
+        uv, valid = self.project_points_to_image(request.points, img_h, img_w)
+        
+        # Create and publish visualization
+        vis_image = self.visualize_traversability(current_frame, traversability_class_map, uv, valid)
+        self.publish_traversability_visualization(vis_image)
 
         response.scores = point_classes.tolist()
         
@@ -248,8 +267,8 @@ class ExplorfmNode(Node):
 
         uv, valid = self.project_points_to_image(points, img_h, img_w)
 
-        # Lookup class for each valid point; default -1 for out-of-bounds.
-        frontier_bools = np.full(len(uv), -1, dtype=np.int8)
+        # Lookup frontier status for each valid point; default False for out-of-bounds.
+        frontier_bools = np.full(len(uv), False, dtype=bool)
         frontier_bools[valid] = frontiers[uv[valid, 1], uv[valid, 0]]  # frontiers[row, col] = frontiers[v, u]
 
         return frontier_bools 
@@ -257,18 +276,46 @@ class ExplorfmNode(Node):
     def project_points_to_image(self, points, img_h: int, img_w: int):
 
         # Assumes points are already in the camera frame.
-        pts = points.reshape(-1, 1, 3).astype(np.float64)
-        pixels, _ = cv2.projectPoints(objectPoints=pts, cameraMatrix=self.calibration_matrix, dist=self.distortion)
+        # Convert list of Point objects to numpy array
+        pts = np.array([[p.x, p.y, p.z] for p in points], dtype=np.float64)
+        pts = pts.reshape(-1, 1, 3)
+        
+        # Log the input points and camera matrix for debugging
+        self.get_logger().info(f"Input points (camera frame): {pts.squeeze()}")
+        self.get_logger().info(f"Camera calibration matrix:\n{np.array(self.calibration_matrix).reshape(3, 3)}")
+        self.get_logger().info(f"Image dimensions: {img_h}x{img_w}")
+        
+        # Identity rotation and zero translation (points already in camera frame)
+        rvec = np.zeros((3, 1), dtype=np.float64)
+        tvec = np.zeros((3, 1), dtype=np.float64)
+
+        # TODO: More safety around negative z values.
+        
+        pixels, _ = cv2.projectPoints(
+            objectPoints=pts, 
+            rvec=rvec, 
+            tvec=tvec,
+            cameraMatrix=np.array(self.calibration_matrix).reshape(3, 3), 
+            distCoeffs=np.array(self.distortion)
+        )
         pixels = pixels.reshape(-1, 2)   # (N, 2)  [u, v]
+
+        # Log projected pixels before rounding
+        self.get_logger().info(f"Projected pixels (before rounding): {pixels}")
 
         # Round to nearest integer pixel.
         uv = np.round(pixels).astype(np.int32)  # (N, 2)
+
+        # Log projected pixels after rounding
+        self.get_logger().info(f"Projected pixels (after rounding): {uv}")
 
         # Mask out points that project outside the image bounds.
         valid = (
             (uv[:, 0] >= 0) & (uv[:, 0] < img_w) &
             (uv[:, 1] >= 0) & (uv[:, 1] < img_h)
         )
+
+        self.get_logger().info(f"Valid projections: {valid}")
 
         return uv, valid
 
@@ -280,6 +327,7 @@ class ExplorfmNode(Node):
     def visualize_frontiers(self, image_rgb, frontiers, uv, valid):
         """
         Create a visualization with frontier pixels highlighted in red and points marked with 'x'.
+        The frontier overlay is semi-transparent to show the original image underneath.
         
         Args:
             image_rgb: RGB image numpy array (H, W, 3)
@@ -291,37 +339,157 @@ class ExplorfmNode(Node):
             Annotated RGB image as numpy array
         """
         # Make a copy to avoid modifying the original
-        vis_image = image_rgb.copy().astype(np.uint8)
+        vis_image = image_rgb.copy().astype(np.float32) / 255.0
         
-        # Highlight frontier pixels in red
+        # Create overlay with frontier pixels in red
         frontier_mask = frontiers.astype(bool)
-        vis_image[frontier_mask] = [255, 0, 0]  # Red in RGB
+        alpha = 0.4  # Transparency level (0.0 = fully transparent, 1.0 = fully opaque)
+        vis_image[frontier_mask] = (1 - alpha) * vis_image[frontier_mask] + alpha * np.array([1.0, 0.0, 0.0])  # Red in RGB
         
-        # Draw 'x' markers for valid projected points
-        marker_size = 10
-        marker_color = (255, 255, 255)  # White in RGB
+        # Convert back to uint8
+        vis_image = (vis_image * 255).astype(np.uint8)
+        
+        # Draw 'x' markers for valid projected points with black outline for visibility
+        marker_size = 15
+        marker_color = (255, 0, 255)  # Magenta/Purple in RGB
+        marker_thickness = 3
+        outline_thickness = 5
+        outline_color = (0, 0, 0)  # Black in RGB
         
         for i, (u, v) in enumerate(uv):
             if valid[i]:
                 u, v = int(u), int(v)
-                # Draw crossing lines to form an 'x'
-                cv2.line(vis_image, (u - marker_size, v - marker_size), (u + marker_size, v + marker_size), marker_color, 2)
-                cv2.line(vis_image, (u + marker_size, v - marker_size), (u - marker_size, v + marker_size), marker_color, 2)
+                # Draw black outline first for contrast
+                cv2.line(vis_image, (u - marker_size, v - marker_size), (u + marker_size, v + marker_size), outline_color, outline_thickness)
+                cv2.line(vis_image, (u + marker_size, v - marker_size), (u - marker_size, v + marker_size), outline_color, outline_thickness)
+                # Draw magenta/purple cross on top
+                cv2.line(vis_image, (u - marker_size, v - marker_size), (u + marker_size, v + marker_size), marker_color, marker_thickness)
+                cv2.line(vis_image, (u + marker_size, v - marker_size), (u - marker_size, v + marker_size), marker_color, marker_thickness)
         
         return vis_image
     
     def publish_visualization(self, image_rgb):
         """
-        Publish visualization image to frontier_visualization topic.
+        Save frontier visualization to disk.
         
         Args:
             image_rgb: RGB image numpy array (H, W, 3)
         """
         try:
-            img_msg = bridge.cv2_to_imgmsg(image_rgb, encoding='rgb8')
-            self.frontier_vis_pub.publish(img_msg)
+            self.save_frontier_debug_image(image_rgb)
         except Exception as e:
-            self.get_logger().error(f"Failed to publish visualization: {e}")
+            self.get_logger().error(f"Failed to save frontier visualization: {e}")
+    
+    def save_frontier_debug_image(self, image_rgb):
+        """
+        Save frontier visualization to disk with timestamp.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+        """
+        if not self.save_debug_images:
+            return
+        
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            filename = f"frontier_{timestamp}.png"
+            filepath = self.debug_output_dir / filename
+            
+            # Convert RGB to BGR for OpenCV
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(filepath), image_bgr)
+            self.get_logger().debug(f"Saved frontier debug image: {filepath}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to save frontier debug image: {e}")
+    
+    def visualize_traversability(self, image_rgb, traversability_class_map, uv, valid):
+        """
+        Create a visualization with traversability classes color-coded and points marked with crosses.
+        Class 0 = green (traversable), Class 1 = yellow (mild), Class 2 = red (untraversable)
+        The class overlays are semi-transparent to show the original image underneath.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+            traversability_class_map: Class map (H, W) with values 0, 1, 2
+            uv: Projected pixel coordinates (N, 2)
+            valid: Boolean mask for valid projections (N,)
+        
+        Returns:
+            Annotated RGB image as numpy array
+        """
+        # Make a copy and convert to float for blending
+        vis_image = image_rgb.copy().astype(np.float32) / 255.0
+        
+        alpha = 0.4  # Transparency level (0.0 = fully transparent, 1.0 = fully opaque)
+        
+        # Color-code traversability classes with transparency
+        # Class 0: traversable (green)
+        traversable_mask = traversability_class_map == 0
+        vis_image[traversable_mask] = (1 - alpha) * vis_image[traversable_mask] + alpha * np.array([0.0, 1.0, 0.0])  # Green in RGB
+        
+        # Class 1: mild (yellow)
+        mild_mask = traversability_class_map == 1
+        vis_image[mild_mask] = (1 - alpha) * vis_image[mild_mask] + alpha * np.array([1.0, 1.0, 0.0])  # Yellow in RGB
+        
+        # Class 2: untraversable (red)
+        untraversable_mask = traversability_class_map == 2
+        vis_image[untraversable_mask] = (1 - alpha) * vis_image[untraversable_mask] + alpha * np.array([1.0, 0.0, 0.0])  # Red in RGB
+        
+        # Convert back to uint8
+        vis_image = (vis_image * 255).astype(np.uint8)
+        
+        # Draw cross markers for valid projected points with black outline for visibility
+        marker_size = 15
+        marker_color = (255, 0, 255)  # Magenta/Purple in RGB
+        marker_thickness = 3
+        outline_thickness = 5
+        outline_color = (0, 0, 0)  # Black in RGB
+        
+        for i, (u, v) in enumerate(uv):
+            if valid[i]:
+                u, v = int(u), int(v)
+                # Draw black outline first for contrast
+                cv2.line(vis_image, (u, v - marker_size), (u, v + marker_size), outline_color, outline_thickness)
+                cv2.line(vis_image, (u - marker_size, v), (u + marker_size, v), outline_color, outline_thickness)
+                # Draw magenta/purple cross on top
+                cv2.line(vis_image, (u, v - marker_size), (u, v + marker_size), marker_color, marker_thickness)
+                cv2.line(vis_image, (u - marker_size, v), (u + marker_size, v), marker_color, marker_thickness)
+        
+        return vis_image
+    
+    def publish_traversability_visualization(self, image_rgb):
+        """
+        Save traversability visualization to disk.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+        """
+        try:
+            self.save_traversability_debug_image(image_rgb)
+        except Exception as e:
+            self.get_logger().error(f"Failed to save traversability visualization: {e}")
+    
+    def save_traversability_debug_image(self, image_rgb):
+        """
+        Save traversability visualization to disk with timestamp.
+        
+        Args:
+            image_rgb: RGB image numpy array (H, W, 3)
+        """
+        if not self.save_debug_images:
+            return
+        
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+            filename = f"traversability_{timestamp}.png"
+            filepath = self.debug_output_dir / filename
+            
+            # Convert RGB to BGR for OpenCV
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(filepath), image_bgr)
+            self.get_logger().debug(f"Saved traversability debug image: {filepath}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to save traversability debug image: {e}")
     
 def main(args=None):
     rclpy.init(args=args)

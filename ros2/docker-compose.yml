@@ -2,13 +2,19 @@ services:
   ros2_humble:
     image: explorfm_ros:latest
     build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: explorfm_ros2_humble
+      context: ..
+      dockerfile: ros2/Dockerfile
+    container_name: explorfm_ros2
     working_dir: /ros2_ws
     environment:
       - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - SAVE_DEBUG_IMAGES=true
     stdin_open: true
     tty: true
-    network_mode: "host"
-
+    # network_mode: "host"
+    volumes:
+      - ./rosbags:/ros2_ws/rosbags
+      - ./debug_images:/debug_images
+    ports:
+      - 8765:8765
