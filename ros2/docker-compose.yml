@@ -1,7 +1,6 @@
-version: '3.8'
-
 services:
   ros2_humble:
+    image: explorfm_ros:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -11,14 +10,11 @@ services:
       - ./build:/ros2_ws/build
       - ./install:/ros2_ws/install
       - ./log:/ros2_ws/log
+      - ./model_ckpts:/ros2_ws/model_ckpts
     working_dir: /ros2_ws
     environment:
       - ROS_DOMAIN_ID=0
     stdin_open: true
     tty: true
-    networks:
-      - ros2_network
+    network_mode: "host"
 
-networks:
-  ros2_network:
-    driver: bridge

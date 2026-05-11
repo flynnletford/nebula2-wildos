@@ -10,10 +10,17 @@ RUN apt-get update && apt-get install -y \
     python3-colcon-common-extensions \
     ros-humble-rosidl-default-generators \
     ros-humble-rosidl-default-runtime \
+    ros-humble-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up ROS2 workspace
 WORKDIR /ros2_ws
+
+# Copy model checkpoints into the container
+COPY model_ckpts /ros2_ws/model_ckpts
+
+# Copy ROS2 source code
+COPY src /ros2_ws/src
 
 # Source ROS2 setup in bashrc
 RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc

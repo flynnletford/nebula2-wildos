@@ -10,15 +10,15 @@ from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy
 
 from cv_bridge import CvBridge
 
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from explorfm_msgs.srv import ScoreVisualFrontiers, ScoreTraversability
 
 from explorfm.explorfm_model import ExploRFMInference
 
 bridge = CvBridge()
 
-CAMERA_TOPIC = "/camera/color/image_raw"
-CAMERA_INFO_TOPIC = "/camera/color/camera_info"
+CAMERA_TOPIC = "/boxi/alphasense/front_center/image_raw/compressed"
+CAMERA_INFO_TOPIC = "/boxi/alphasense/front_center/camera_info"
 
 VISUAL_FRONTIER_CONFIDENCE_THRESHOLD = 0.6
 
@@ -66,7 +66,7 @@ class ExplorfmNode(Node):
         )
 
         self.image_sub = self.create_subscription(
-            Image,
+            CompressedImage,
             CAMERA_TOPIC,
             self.image_callback,
             qos_profile=best_effort_qos
@@ -105,16 +105,14 @@ class ExplorfmNode(Node):
 
     def image_callback(self, msg):
         """
-        Callback for image messages.
+        Callback for compressed image messages.
         Stores only the latest frame (older frames are discarded due to QoS settings).
 
         Args:
-            msg: sensor_msgs/Image message
+            msg: sensor_msgs/CompressedImage message
         """
 
-        bgr = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        rgb = bgr[..., ::-1]
-
+        rgb = bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='rgb8')
         self.latest_frame = rgb
 
         self.get_logger().debug('Latest frame received')
