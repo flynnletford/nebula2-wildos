@@ -54,7 +54,10 @@ python -u src/train.py experiment=gtour_radio_cnn_new ckpt_path="/path/to/checkp
 ```bash
 cd explorfm_trainer
 
-# Evaluate traversability head (edit configs/evaluation/radio_ovts.yaml for paths)
+# Evaluate a trained traversability checkpoint (RADIO_CNN head)
+python -u src/eval.py evaluation=radio_cnn ckpt_path="/path/to/checkpoint.ckpt"
+
+# Run open-vocabulary traversability ablation (training-free)
 python -u src/eval.py evaluation=radio_ovts
 ```
 

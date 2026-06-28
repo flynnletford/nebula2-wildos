@@ -38,9 +38,16 @@ class RUGDTraversabilityDataset(Dataset):
         self.resize_resolution = resize_resolution
         self.phase = phase
         
+        # 3-class traversability labels
+        # Class 0: Safe - hardened terrain
         self.safe_labels = [
-            "dirt", "sand", "grass", "asphalt", "gravel", "mulch", "rock-bed", "concrete"
+            "asphalt", "gravel", "rock-bed", "concrete"
         ]
+        # Class 1: Mildly Dangerous - natural terrain with vegetation/loose material
+        self.mildly_dangerous_labels = [
+            "dirt", "sand", "grass", "mulch"
+        ]
+        # Class 2: Untraversable - water, obstacles, etc (anything not in classes 0 or 1)
         self.train_scenes = [
             "park-1", "park-2", "trail", "trail-3", "trail-4",
             "trail-5", "trail-6", "trail-7", "trail-9", "trail-10", "trail-11",
@@ -50,8 +57,10 @@ class RUGDTraversabilityDataset(Dataset):
         self.split_scenes = ["creek", "village"]
         self.split_percentages = [0.8, 0.2]  # 80% for training, 20% for validation
 
-        self.raw_frames_path = os.path.join(self.data_dir, "RUGD_frames")
-        self.annotations_path = os.path.join(self.data_dir, "RUGD_annotations")
+        data_dir = "/home/fletford/Documents/flynn-fork-wildos/nebula2-wildos/training/data/RUGD"
+
+        self.raw_frames_path = os.path.join(data_dir, "RUGD_frames")
+        self.annotations_path = os.path.join(data_dir, "RUGD_annotations")
         self.colormap_path = os.path.join(self.annotations_path, "RUGD_annotation-colormap.txt")
         self.seg_colormap = self.load_annotations()
 
@@ -137,17 +146,28 @@ class RUGDTraversabilityDataset(Dataset):
         return train_paths, val_paths
     
     def get_traversability(self, gt_img: np.ndarray) -> np.ndarray:
-        """Convert ground truth image to traversability map."""
-        safe_mask = np.zeros(gt_img.shape[:2], dtype=np.uint8)
+        """Convert ground truth image to traversability class map.
+        Returns class indices: 0=safe, 1=mildly_dangerous, 2=untraversable
+        """
+        traversability_map = np.ones(gt_img.shape[:2], dtype=np.uint8) * 2  # Default to untraversable
 
+        # Assign class 0 (safe) labels
         for label in self.safe_labels:
             if label not in self.seg_colormap:
                 raise ValueError(f"Label '{label}' not found in segmentation colormap.")
             color = self.seg_colormap[label]
             mask = np.all(gt_img == np.array(color), axis=-1)
-            safe_mask[mask] = 1
+            traversability_map[mask] = 0
 
-        return safe_mask
+        # Assign class 1 (mildly_dangerous) labels
+        for label in self.mildly_dangerous_labels:
+            if label not in self.seg_colormap:
+                raise ValueError(f"Label '{label}' not found in segmentation colormap.")
+            color = self.seg_colormap[label]
+            mask = np.all(gt_img == np.array(color), axis=-1)
+            traversability_map[mask] = 1
+
+        return traversability_map
     
     def __getitem__(self, idx: int) -> Dict:
         """Load an item from the dataset."""
@@ -159,8 +179,7 @@ class RUGDTraversabilityDataset(Dataset):
 
         # Convert to tensor
         raw_img = self.transforms(raw_img)
-        gt_traversability = torch.tensor(gt_traversability)
-        gt_traversability = gt_traversability.unsqueeze(0)  # Add channel dimension
+        gt_traversability = torch.tensor(gt_traversability, dtype=torch.long)  # Long for class indices
         gt_img = torch.tensor(gt_img)
 
         original_size = raw_img.shape[-2:]
@@ -344,7 +363,9 @@ if __name__ == "__main__":
         print(f"Image batch shape: {raw_img.shape}")
         print(f"Raw image max: {raw_img.max()}, min: {raw_img.min()}")
         assert raw_img.max() <= 1.0 and raw_img.min() >= 0.0, "Raw image tensor should be normalized to [0, 1] range."
-        assert torch.all((gt_traversability == 0) | (gt_traversability == 1)), "Ground truth traversability should be binary (0 or 1)."
+        assert torch.all((gt_traversability == 0) | (gt_traversability == 1) | (gt_traversability == 2)), "Ground truth traversability should be 3-class (0, 1, or 2)."
+        print(f"Traversability shape: {gt_traversability.shape}")
+        print(f"Traversability classes: {torch.unique(gt_traversability)}")
 
         for idx in range(B):
             fig, axes = plt.subplots(1, 3, figsize=(15, 8))
@@ -359,9 +380,16 @@ if __name__ == "__main__":
             axes[1].set_title('Ground Truth Segmentation')
             axes[1].axis('off')
 
-            # 3. Ground Truth Traversability Map
-            axes[2].imshow(gt_traversability[idx][0], cmap='gray')
-            axes[2].set_title('Ground Truth Safe Mask')
+            # 3. Ground Truth Traversability Map (3-class)
+            traversability_colored = np.zeros((*gt_traversability[idx].shape, 3), dtype=np.float32)
+            # Class 0 (safe) = green
+            traversability_colored[gt_traversability[idx] == 0] = [0, 1, 0]
+            # Class 1 (mildly_dangerous) = yellow
+            traversability_colored[gt_traversability[idx] == 1] = [1, 1, 0]
+            # Class 2 (untraversable) = red
+            traversability_colored[gt_traversability[idx] == 2] = [1, 0, 0]
+            axes[2].imshow(traversability_colored)
+            axes[2].set_title('Ground Truth Traversability (0=safe/green, 1=mild/yellow, 2=untraversable/red)')
             axes[2].axis('off')
 
             # Add segmentation legend below all subplots

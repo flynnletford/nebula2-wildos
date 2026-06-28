@@ -92,7 +92,7 @@ class ExploRFMONNXInference:
     def model_forward(self, x: torch.Tensor):
         """
         Returns:
-            traversability: torch.Tensor [1, 1, H?, W?]
+            traversability: torch.Tensor [1, 3, H?, W?] - 3-class probabilities (safe, mildly_dangerous, untraversable)
             frontiers:      torch.Tensor [1, 1, H?, W?]
             text_feats:     torch.Tensor [1, 768, H?/16, W?/16] (shape depends on model)
         """

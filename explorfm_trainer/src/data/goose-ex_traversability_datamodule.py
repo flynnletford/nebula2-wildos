@@ -149,16 +149,28 @@ class GooseExTraversabilityDataset(Dataset):
         else:
             self.dataset_dict = data_dict
 
+        # 3-class traversability labels
+        # Class 0: Safe - hardened terrain
         self.safe_labels = [
-            "cobble", "snow", "leaves", "bikeway", "pedestrian_crossing", "road_marking", "sidewalk", "curb",
-            "asphalt", "gravel", "soil", "low_grass"
+            "cobble", "bikeway", "pedestrian_crossing", "road_marking", "sidewalk", "curb", "asphalt"
         ]
+        # Class 1: Mildly Dangerous - natural terrain with vegetation/loose material
+        self.mildly_dangerous_labels = [
+            "gravel", "soil", "low_grass", "leaves", "snow"
+        ]
+        # Class 2: Untraversable - water, obstacles, etc (anything not in classes 0 or 1)
+        
         self.safe_ids = []
+        self.mildly_dangerous_ids = []
         for m in self.mapping:
             if m['class_name'] in self.safe_labels:
                 self.safe_ids.append(int(m['label_key']))
+            elif m['class_name'] in self.mildly_dangerous_labels:
+                self.mildly_dangerous_ids.append(int(m['label_key']))
         print(f"Safe labels: {self.safe_labels}")
         print(f"Safe IDs: {self.safe_ids}")
+        print(f"Mildly dangerous labels: {self.mildly_dangerous_labels}")
+        print(f"Mildly dangerous IDs: {self.mildly_dangerous_ids}")
 
         self.train_transforms = transforms.Compose([
             transforms.ToTensor(),
@@ -177,14 +189,22 @@ class GooseExTraversabilityDataset(Dataset):
         return len(self.dataset_dict)
     
     def get_traversability(self, label_img: np.ndarray) -> np.ndarray:
-        """Convert ground truth label to a binary traversability map."""
-        safe_mask = np.zeros_like(label_img, dtype=np.uint8)
+        """Convert ground truth label to a 3-class traversability map.
+        Returns class indices: 0=safe, 1=mildly_dangerous, 2=untraversable
+        """
+        traversability_map = np.ones_like(label_img, dtype=np.uint8) * 2  # Default to untraversable
 
-        for label in self.safe_ids:
-            mask = label_img == label
-            safe_mask[mask] = 1
+        # Assign class 0 (safe)
+        for label_id in self.safe_ids:
+            mask = label_img == label_id
+            traversability_map[mask] = 0
 
-        return safe_mask
+        # Assign class 1 (mildly_dangerous)
+        for label_id in self.mildly_dangerous_ids:
+            mask = label_img == label_id
+            traversability_map[mask] = 1
+
+        return traversability_map
     
     def preprocess(self, image):
         if image is None:
@@ -227,8 +247,7 @@ class GooseExTraversabilityDataset(Dataset):
 
         # Convert to tensor
         raw_img = self.transforms(image)
-        gt_traversability = torch.tensor(gt_traversability)
-        gt_traversability = gt_traversability.unsqueeze(0)  # Add channel dimension
+        gt_traversability = torch.tensor(gt_traversability, dtype=torch.long)  # Long for class indices
         gt_img = torch.tensor(gt_img)
 
         return {
@@ -419,7 +438,9 @@ if __name__ == "__main__":
         print(f"Image batch shape: {raw_img.shape}")
         print(f"Raw image max: {raw_img.max()}, min: {raw_img.min()}")
         assert raw_img.max() <= 1.0 and raw_img.min() >= 0.0, "Raw image tensor should be normalized to [0, 1] range."
-        assert torch.all((gt_traversability == 0) | (gt_traversability == 1)), "Ground truth traversability should be binary (0 or 1)."
+        assert torch.all((gt_traversability == 0) | (gt_traversability == 1) | (gt_traversability == 2)), "Ground truth traversability should be 3-class (0, 1, or 2)."
+        print(f"Traversability shape: {gt_traversability.shape}")
+        print(f"Traversability classes: {torch.unique(gt_traversability)}")
 
         for idx in range(B):
             fig, axes = plt.subplots(1, 3, figsize=(15, 8))
@@ -434,9 +455,16 @@ if __name__ == "__main__":
             axes[1].set_title('Ground Truth Segmentation')
             axes[1].axis('off')
 
-            # 3. Ground Truth Traversability Map
-            axes[2].imshow(gt_traversability[idx][0], cmap='gray')
-            axes[2].set_title('Ground Truth Safe Mask')
+            # 3. Ground Truth Traversability Map (3-class)
+            traversability_colored = np.zeros((*gt_traversability[idx].shape, 3), dtype=np.float32)
+            # Class 0 (safe) = green
+            traversability_colored[gt_traversability[idx] == 0] = [0, 1, 0]
+            # Class 1 (mildly_dangerous) = yellow
+            traversability_colored[gt_traversability[idx] == 1] = [1, 1, 0]
+            # Class 2 (untraversable) = red
+            traversability_colored[gt_traversability[idx] == 2] = [1, 0, 0]
+            axes[2].imshow(traversability_colored)
+            axes[2].set_title('Ground Truth Traversability (0=safe/green, 1=mild/yellow, 2=untraversable/red)')
             axes[2].axis('off')
 
             plt.tight_layout(rect=[0, 0.1, 1, 1])  # Leave space for the legend

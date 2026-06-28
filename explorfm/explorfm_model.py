@@ -75,7 +75,7 @@ class ExploRFM(nn.Module):
         )
     
     def init_traversability_head(self, traversability_ckpt: str) -> None:
-        """Initialize the traversability detection head."""
+        """Initialize the traversability detection head (3-class: safe, mildly_dangerous, untraversable)."""
         self.traversability_head = nn.Sequential(
             nn.ConvTranspose2d(self.dim, self.dim//2, 2, stride=2),
             nn.Conv2d(self.dim//2, self.dim//2, 3, padding=1),
@@ -86,7 +86,7 @@ class ExploRFM(nn.Module):
             nn.ConvTranspose2d(self.dim//4, self.dim//8, 2, stride=2),
             nn.Conv2d(self.dim//8, self.dim//8, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(self.dim//8, 1, 2, stride=2),
+            nn.ConvTranspose2d(self.dim//8, 3, 2, stride=2),
         )
         # load traversability checkpoint
         if os.path.exists(traversability_ckpt):
@@ -94,7 +94,7 @@ class ExploRFM(nn.Module):
             state_dict = {}
             for k, v in orig_state_dict.items():
                 state_dict[k.replace('net.head.', '')] = v
-            self.traversability_head.load_state_dict(state_dict)
+            self.traversability_head.load_state_dict(state_dict, strict=False)  # Allow mismatched sizes when updating from 1 to 3 channels
             print(f"Loaded traversability head from {traversability_ckpt}")
         else:
             raise FileNotFoundError(f"Traversability checkpoint not found: {traversability_ckpt}")
@@ -162,7 +162,7 @@ class ExploRFM(nn.Module):
         if self.traversability_head is not None:
             traversability = self.traversability_head(spatial_features)
             traversability = F.interpolate(traversability, size=x.shape[-2:], mode='bilinear', align_corners=False)
-            traversability = F.sigmoid(traversability)
+            traversability = F.softmax(traversability, dim=1)  # Apply softmax for 3-class probabilities
 
         frontiers = None
         if self.frontier_head is not None:
